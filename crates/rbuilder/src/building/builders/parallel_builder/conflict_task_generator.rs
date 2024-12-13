@@ -4,7 +4,7 @@ use alloy_primitives::{utils::format_ether, U256};
 use crossbeam_queue::SegQueue;
 use itertools::Itertools;
 use std::time::Instant;
-use tracing::{trace, warn};
+use tracing::trace;
 
 use super::{
     task::ConflictTask, Algorithm, ConflictGroup, ConflictResolutionResultPerGroup, GroupId,
@@ -183,16 +183,10 @@ impl ConflictTaskGenerator {
             total_profit: group.orders[0].sim_value.coinbase_profit,
             sequence_of_orders: vec![(0, group.orders[0].sim_value.coinbase_profit)],
         };
-        if let Err(e) = self
+        // We ignore the error since it means "receiver disconnected" and we expect the caller will detect the cancellation and stop calling us.
+        let _ = self
             .group_result_sender
-            .send((group_id, (sequence_of_orders, group.clone())))
-        {
-            warn!(
-                error = ?e,
-                group_id,
-                "Failed to send single order result for group",
-            );
-        }
+            .send((group_id, (sequence_of_orders, group.clone())));
     }
 
     /// Determines if there are any changes between a new group and an existing group.

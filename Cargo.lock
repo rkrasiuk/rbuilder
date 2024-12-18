@@ -7813,6 +7813,7 @@ dependencies = [
  "sqlx",
  "ssz_rs 0.9.0 (git+https://github.com/ralexstokes/ssz-rs.git)",
  "ssz_rs_derive 0.9.0 (git+https://github.com/ralexstokes/ssz-rs.git)",
+ "sysperf",
  "tempfile",
  "test_utils",
  "thiserror 1.0.69",
@@ -12456,6 +12457,16 @@ dependencies = [
  "memchr",
  "ntapi",
  "windows 0.57.0",
+]
+
+[[package]]
+name = "sysperf"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives 0.8.12",
+ "num_cpus",
+ "rand 0.8.5",
+ "rayon",
 ]
 
 [[package]]

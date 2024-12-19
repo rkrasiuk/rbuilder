@@ -202,9 +202,9 @@ where
                 continue;
             }
             // Allow only increasing blocks
-            if last_processed_block.map_or(false, |last_processed_block| {
-                payload.block() <= last_processed_block
-            }) {
+            if last_processed_block
+                .is_some_and(|last_processed_block| payload.block() <= last_processed_block)
+            {
                 continue;
             }
             let current_time = OffsetDateTime::now_utc();

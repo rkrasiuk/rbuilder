@@ -353,7 +353,7 @@ impl RawShareBundle {
                 None
             };
 
-        if self.metadata.as_ref().map_or(false, |r| r.cancelled) {
+        if self.metadata.as_ref().is_some_and(|r| r.cancelled) {
             return Ok(RawShareBundleDecodeResult::CancelShareBundle(
                 CancelShareBundle {
                     block,

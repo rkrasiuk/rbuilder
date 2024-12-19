@@ -1,10 +1,13 @@
 use alloy_primitives::{keccak256, B256};
 use rand::Rng;
 use rayon::prelude::*;
-use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
-use std::time::Instant;
+use std::{
+    fs::OpenOptions,
+    io::{Seek, SeekFrom, Write},
+    path::Path,
+    time::Instant,
+};
+use sysinfo::{Disks, Networks, System};
 
 // Common result structures
 #[derive(Debug)]
@@ -37,6 +40,18 @@ pub struct CpuBenchmarkResult {
     pub total_hashes: u64,
     pub duration_secs: f64,
     pub threads_used: usize,
+}
+
+#[derive(Debug)]
+pub struct SystemInfoResult {
+    pub long_os_version: Option<String>,
+    pub kernel_version: Option<String>,
+    pub cpu_brand: String,
+    pub cpu_count: usize,
+    pub total_memory_mb: u64,
+    pub used_memory_mb: u64,
+    pub disk_info: String,
+    pub network_info: String,
 }
 
 // Disk Benchmarks
@@ -243,9 +258,68 @@ pub fn run_all_benchmarks(
     })
 }
 
-pub fn format_results(result: &BenchmarkResult) -> String {
+pub fn gather_system_info() -> SystemInfoResult {
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let long_os_version = System::long_os_version();
+    let kernel_version = System::kernel_version();
+    let cpu_brand = if !sys.cpus().is_empty() {
+        sys.cpus()[0].brand().to_string()
+    } else {
+        "Unknown CPU".to_string()
+    };
+
+    let cpu_count = sys.cpus().len();
+    let total_memory_mb = sys.total_memory() / 1024;
+    let used_memory_mb = sys.used_memory() / 1024;
+
+    let networks = Networks::new_with_refreshed_list();
+    let disks = Disks::new_with_refreshed_list();
+
+    // Build the disk_info string
+    let mut disk_info = String::from("Disks:\n");
+    for disk in disks.list() {
+        disk_info.push_str(&format!(
+            "  {:?}: {}B total, {}B available\n",
+            disk.name(),
+            disk.total_space(),
+            disk.available_space()
+        ));
+    }
+
+    // Build the network_info string
+    let mut network_info = String::from("Networks:\n");
+    for (name, data) in networks.list() {
+        network_info.push_str(&format!(
+            "  {}: received={}B, transmitted={}B\n",
+            name,
+            data.total_received(),
+            data.total_transmitted()
+        ));
+    }
+
+    SystemInfoResult {
+        long_os_version,
+        kernel_version,
+        cpu_brand,
+        cpu_count,
+        total_memory_mb,
+        used_memory_mb,
+        disk_info,
+        network_info,
+    }
+}
+
+pub fn format_results(result: &BenchmarkResult, sysinfo: &SystemInfoResult) -> String {
     format!(
-        "Hardware Benchmark Results:\n\
+        "System Information:\n\
+         OS Version: {}\n\
+         Kernel Version: {}\n\
+         CPU: {} ({} cores)\n\
+         Total Memory: {} MB\n\
+         Used Memory: {} MB\n\
+         \nHardware Benchmark Results:\n\
          \nDisk Performance:\
          \n  Sequential Write: {:.2} MB/s ({:.2} ops/s)\
          \n  Random Write: {:.2} MB/s ({:.2} ops/s)\
@@ -253,7 +327,21 @@ pub fn format_results(result: &BenchmarkResult) -> String {
          \n  Bandwidth: {:.2} GB/s\
          \n\nCPU Performance:\
          \n  Single-threaded: {:.2} hashes/s\
-         \n  Multi-threaded: {:.2} hashes/s (using {} threads)",
+         \n  Multi-threaded: {:.2} hashes/s (using {} threads)\
+         \n\n{}\
+         \n{}",
+        sysinfo
+            .long_os_version
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string()),
+        sysinfo
+            .kernel_version
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string()),
+        sysinfo.cpu_brand,
+        sysinfo.cpu_count,
+        sysinfo.total_memory_mb,
+        sysinfo.used_memory_mb,
         result.disk_sequential.throughput_mb_s,
         result.disk_sequential.operations_per_second,
         result.disk_random.throughput_mb_s,
@@ -261,7 +349,9 @@ pub fn format_results(result: &BenchmarkResult) -> String {
         result.memory.bandwidth_gb_s,
         result.cpu_single.hashes_per_second,
         result.cpu_parallel.hashes_per_second,
-        result.cpu_parallel.threads_used
+        result.cpu_parallel.threads_used,
+        sysinfo.disk_info,
+        sysinfo.network_info,
     )
 }
 

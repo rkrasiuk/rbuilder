@@ -6,7 +6,7 @@ use reth_db::Database;
 use reth_provider::{BlockReader, DatabaseProviderFactory, HeaderProvider, StateProviderFactory};
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
-use sysperf::{format_results, run_all_benchmarks};
+use sysperf::{format_results, gather_system_info, run_all_benchmarks};
 use tokio::signal::ctrl_c;
 use tokio_util::sync::CancellationToken;
 
@@ -102,7 +102,8 @@ where
             let result =
                 run_all_benchmarks(&PathBuf::from("/tmp/benchmark_test.tmp"), 100, 100, 1000)?;
 
-            println!("{}", format_results(&result));
+            let sysinfo = gather_system_info();
+            println!("{}", format_results(&result, &sysinfo));
             return Ok(());
         }
     };

@@ -257,6 +257,10 @@ impl L1Config {
         };
 
         let relays = self.create_relays()?;
+        if relays.is_empty() {
+            eyre::bail!("No relays provided");
+        }
+
         let sink_factory: Box<dyn BuilderSinkFactory> = Box::new(RelaySubmitSinkFactory::new(
             submission_config,
             relays.clone(),

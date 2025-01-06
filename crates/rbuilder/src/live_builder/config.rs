@@ -42,7 +42,8 @@ use alloy_primitives::{
     FixedBytes, B256,
 };
 use ethereum_consensus::{
-    builder::compute_builder_domain, primitives::Version, state_transition::Context as ContextEth,
+    builder::compute_builder_domain, crypto::SecretKey, primitives::Version,
+    state_transition::Context as ContextEth,
 };
 use eyre::Context;
 use reth::revm::cached::CachedReads;
@@ -64,7 +65,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::info;
+use tracing::{info, warn};
 use url::Url;
 
 /// We initialize the wallet with the last full day. This should be enough for any bidder.
@@ -111,7 +112,7 @@ pub struct L1Config {
     #[serde_as(deserialize_as = "OneOrMany<_>")]
     pub dry_run_validation_url: Vec<String>,
     /// Secret key that will be used to sign normal submissions to the relay.
-    relay_secret_key: EnvOrValue<String>,
+    relay_secret_key: Option<EnvOrValue<String>>,
     /// Secret key that will be used to sign optimistic submissions to the relay.
     optimistic_relay_secret_key: EnvOrValue<String>,
     /// When enabled builer will make optimistic submissions to optimistic relays
@@ -140,7 +141,7 @@ impl Default for L1Config {
             relays: vec![],
             dry_run: false,
             dry_run_validation_url: vec![],
-            relay_secret_key: "".into(),
+            relay_secret_key: None,
             optimistic_relay_secret_key: "".into(),
             optimistic_enabled: false,
             optimistic_max_bid_value_eth: "0.0".to_string(),
@@ -203,7 +204,15 @@ impl L1Config {
             self.genesis_fork_version.clone(),
         )?;
 
-        let signer = BLSBlockSigner::from_string(self.relay_secret_key.value()?, signing_domain)
+        let relay_secret_key = if let Some(secret_key) = &self.relay_secret_key {
+            let resolved_key = secret_key.value()?;
+            SecretKey::try_from(resolved_key)?
+        } else {
+            warn!("No relay secret key provided. A random key will be generated.");
+            SecretKey::random(&mut rand::thread_rng())?
+        };
+
+        let signer = BLSBlockSigner::new(relay_secret_key, signing_domain)
             .map_err(|e| eyre::eyre!("Failed to create normal signer: {:?}", e))?;
 
         let optimistic_signer = if self.optimistic_enabled {

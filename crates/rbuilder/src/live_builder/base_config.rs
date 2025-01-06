@@ -66,7 +66,7 @@ pub struct BaseConfig {
 
     pub flashbots_db: Option<EnvOrValue<String>>,
 
-    pub el_node_ipc_path: PathBuf,
+    pub el_node_ipc_path: Option<PathBuf>,
     pub jsonrpc_server_port: u16,
     #[serde(default = "default_ip")]
     pub jsonrpc_server_ip: Ipv4Addr,
@@ -391,7 +391,7 @@ impl Default for BaseConfig {
             error_storage_path: None,
             coinbase_secret_key: None,
             flashbots_db: None,
-            el_node_ipc_path: "/tmp/reth.ipc".parse().unwrap(),
+            el_node_ipc_path: None,
             jsonrpc_server_port: DEFAULT_INCOMING_BUNDLES_PORT,
             jsonrpc_server_ip: default_ip(),
             ignore_cancellable_orders: true,

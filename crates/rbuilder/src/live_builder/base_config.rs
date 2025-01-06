@@ -62,7 +62,7 @@ pub struct BaseConfig {
 
     pub error_storage_path: Option<PathBuf>,
 
-    coinbase_secret_key: EnvOrValue<String>,
+    coinbase_secret_key: Option<EnvOrValue<String>>,
 
     pub flashbots_db: Option<EnvOrValue<String>>,
 
@@ -258,7 +258,15 @@ impl BaseConfig {
     }
 
     pub fn coinbase_signer(&self) -> eyre::Result<Signer> {
-        coinbase_signer_from_secret_key(&self.coinbase_secret_key.value()?)
+        if let Some(secret_key) = &self.coinbase_secret_key {
+            return coinbase_signer_from_secret_key(&secret_key.value()?);
+        }
+        warn!("No coinbase secret key provided. A random key will be generated.");
+        warn!(
+            "Caution: If this node wins any block, you wont be able to access the rewards for it."
+        );
+        let new_signer = Signer::random();
+        Ok(new_signer)
     }
 
     pub fn blocklist(&self) -> eyre::Result<HashSet<Address>> {
@@ -381,7 +389,7 @@ impl Default for BaseConfig {
             log_color: false,
             log_enable_dynamic: false,
             error_storage_path: None,
-            coinbase_secret_key: "".into(),
+            coinbase_secret_key: None,
             flashbots_db: None,
             el_node_ipc_path: "/tmp/reth.ipc".parse().unwrap(),
             jsonrpc_server_port: DEFAULT_INCOMING_BUNDLES_PORT,

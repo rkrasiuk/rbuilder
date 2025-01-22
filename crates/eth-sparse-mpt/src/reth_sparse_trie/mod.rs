@@ -3,6 +3,7 @@ use change_set::{prepare_change_set, prepare_change_set_for_prefetch};
 use hash::RootHashError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DatabaseProviderFactory, ExecutionOutcome,
+    StateCommitmentProvider,
 };
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,7 @@ pub fn prefetch_tries_for_accounts<'a, Provider>(
 ) -> Result<(), SparseTrieError>
 where
     Provider: DatabaseProviderFactory<Provider: BlockReader> + Send + Sync,
+    Provider: StateCommitmentProvider,
 {
     let change_set = prepare_change_set_for_prefetch(changed_data);
 
@@ -98,6 +100,7 @@ pub fn calculate_root_hash_with_sparse_trie<Provider>(
 ) -> (Result<B256, SparseTrieError>, SparseTrieMetrics)
 where
     Provider: DatabaseProviderFactory<Provider: BlockReader> + Send + Sync,
+    Provider: StateCommitmentProvider,
 {
     let mut metrics = SparseTrieMetrics::default();
 

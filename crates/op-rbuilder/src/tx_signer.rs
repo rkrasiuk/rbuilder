@@ -1,7 +1,10 @@
+use std::str::FromStr;
+
+use alloy_consensus::SignableTransaction;
 use alloy_primitives::{Address, PrimitiveSignature as Signature, B256, U256};
-use reth_primitives::{
-    public_key_to_address, Transaction, TransactionSigned, TransactionSignedEcRecovered,
-};
+use op_alloy_consensus::OpTypedTransaction;
+use reth_optimism_primitives::OpTransactionSigned;
+use reth_primitives::{public_key_to_address, TransactionSignedEcRecovered};
 use secp256k1::{Message, SecretKey, SECP256K1};
 
 /// Simple struct to sign txs/messages.
@@ -36,18 +39,36 @@ impl Signer {
 
     pub fn sign_tx(
         &self,
-        tx: Transaction,
-    ) -> Result<TransactionSignedEcRecovered, secp256k1::Error> {
-        let signature = self.sign_message(tx.signature_hash())?;
-        let signed = TransactionSigned::new_unhashed(tx, signature);
-        Ok(TransactionSignedEcRecovered::new_unchecked(
-            signed,
-            self.address,
-        ))
+        tx: OpTypedTransaction,
+    ) -> Result<TransactionSignedEcRecovered<OpTransactionSigned>, secp256k1::Error> {
+        let signature_hash = match &tx {
+            OpTypedTransaction::Legacy(tx) => tx.signature_hash(),
+            OpTypedTransaction::Eip2930(tx) => tx.signature_hash(),
+            OpTypedTransaction::Eip1559(tx) => tx.signature_hash(),
+            OpTypedTransaction::Eip7702(tx) => tx.signature_hash(),
+            OpTypedTransaction::Deposit(_) => B256::ZERO,
+        };
+        let signature = self.sign_message(signature_hash)?;
+        let signed = OpTransactionSigned::new_unhashed(tx, signature);
+        Ok(
+            TransactionSignedEcRecovered::<OpTransactionSigned>::new_unchecked(
+                signed,
+                self.address,
+            ),
+        )
     }
 
     pub fn random() -> Self {
         Self::try_from_secret(B256::random()).expect("failed to create random signer")
+    }
+}
+
+impl FromStr for Signer {
+    type Err = eyre::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from_secret(B256::from_str(s)?)
+            .map_err(|e| eyre::eyre!("invalid secret key {:?}", e.to_string()))
     }
 }
 
@@ -56,7 +77,7 @@ mod test {
     use super::*;
     use alloy_consensus::TxEip1559;
     use alloy_primitives::{address, fixed_bytes, TxKind as TransactionKind};
-    use reth_node_core::primitives::SignedTransaction;
+    use reth::core::primitives::SignedTransaction;
     #[test]
     fn test_sign_transaction() {
         let secret =
@@ -65,7 +86,7 @@ mod test {
         let signer = Signer::try_from_secret(secret).expect("signer creation");
         assert_eq!(signer.address, address);
 
-        let tx = Transaction::Eip1559(TxEip1559 {
+        let tx = OpTypedTransaction::Eip1559(TxEip1559 {
             chain_id: 1,
             nonce: 2,
             gas_limit: 21000,

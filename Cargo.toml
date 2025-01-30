@@ -1,3 +1,12 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/flashbots/rbuilder"
+repository = "https://github.com/flashbots/rbuilder"
+exclude = [".github/"]
+
 [workspace]
 members = [
     "crates/rbuilder",
@@ -21,10 +30,6 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 incremental = false
-
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
 
 [workspace.dependencies]
 reth = { git = "https://github.com/paradigmxyz/reth", tag = "v1.1.5" }

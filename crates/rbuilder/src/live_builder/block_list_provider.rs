@@ -1,5 +1,9 @@
+//! Different BlockListProvider flavors.
+//! Metrics are updated here, this is ugly.
 use ahash::HashSet;
-use revm_primitives::Address;
+use itertools::Itertools;
+use revm_primitives::{Address, B256};
+use sha2::{Digest, Sha256};
 use std::{
     fs::read_to_string,
     path::PathBuf,
@@ -10,6 +14,8 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use url::Url;
+
+use crate::telemetry::update_blocklist_metrics;
 
 pub type BlockList = HashSet<Address>;
 
@@ -39,7 +45,23 @@ pub trait BlockListProvider: std::fmt::Debug + Sync + Send {
 
 /// BlockListProvider that always returns Ok(empty list)
 #[derive(Debug)]
-pub struct NullBlockListProvider {}
+pub struct NullBlockListProvider {
+    // Make the struct non-constructible from outside by adding a private field
+    _private: (),
+}
+
+impl NullBlockListProvider {
+    pub fn new() -> Self {
+        update_blocklist_metrics(&BlockList::default());
+        Self { _private: () }
+    }
+}
+
+impl Default for NullBlockListProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl BlockListProvider for NullBlockListProvider {
     fn get_blocklist(&self) -> Result<BlockList, Error> {
@@ -86,7 +108,7 @@ impl HttpBlockListProvider {
         let list = Self::read_list(url.clone(), validate_list)
             .await
             .map_err(|_| Error::UnableToLoadInitialList)?;
-
+        update_blocklist_metrics(&list);
         let last_updated_list = Arc::new(Mutex::new(BlockListWithTimestamp::new(list)));
         let last_updated_list_clone = last_updated_list.clone();
         // Spawn a task that continuously reloads the list
@@ -98,6 +120,7 @@ impl HttpBlockListProvider {
                         // mini bug, we ignore the cancellation while downloading the file.
                         if let Ok(list) = Self::read_list(url.clone(),validate_list).await {
                             let list_len = list.len();
+                            update_blocklist_metrics(&list);
                             *last_updated_list.lock().unwrap() = BlockListWithTimestamp::new(list);
                             info!(list_len,"Blocklist updated");
                         }
@@ -128,6 +151,7 @@ impl HttpBlockListProvider {
             if !should_validate_list || validate_list(&blocklist) {
                 Ok(blocklist.into_iter().collect())
             } else {
+                error!("Invalid blocklist");
                 Err("Invalid list".into())
             }
         };
@@ -173,8 +197,11 @@ impl StaticFileBlockListProvider {
         let blocklist: Vec<Address> =
             serde_json::from_str(&blocklist_file).map_err(|_| Error::UnableToLoadInitialList)?;
         if should_validate_list && !validate_list(&blocklist) {
+            error!("Invalid blocklist");
             return Err(Error::UnableToLoadInitialList);
         }
+        let blocklist: BlockList = blocklist.into_iter().collect();
+        update_blocklist_metrics(&blocklist);
         Ok(Self {
             block_list: blocklist.into_iter().collect(),
         })
@@ -191,6 +218,16 @@ impl BlockListProvider for StaticFileBlockListProvider {
     }
 }
 
+pub fn blocklist_hash(blocklist: &BlockList) -> B256 {
+    let mut hasher = Sha256::new();
+    let sorted_text_hashes = blocklist.iter().sorted();
+    for address in sorted_text_hashes {
+        hasher.update(address.0);
+    }
+    let hash_bytes = hasher.finalize();
+    B256::from_slice(&hash_bytes)
+}
+
 #[cfg(test)]
 mod test {
     use std::{
@@ -202,12 +239,24 @@ mod test {
         time::Duration,
     };
 
-    use super::HttpBlockListProvider;
-    use crate::live_builder::block_list_provider::{BlockList, BlockListProvider};
+    use super::{blocklist_hash, BlockList, BlockListProvider, HttpBlockListProvider};
     use lazy_static::lazy_static;
-    use revm_primitives::Address;
+    use revm_primitives::{Address, B256};
     use tokio_util::sync::CancellationToken;
     use url::Url;
+
+    #[test]
+    fn test_blocklist_hash() {
+        let json = r#"["0x05E0b5B40B7b66098C2161A5EE11C5740A3A7C45","0x01e2919679362dFBC9ee1644Ba9C6da6D6245BB1","0x03893a7c7463AE47D46bc7f091665f1893656003","0x04DBA1194ee10112fE6C3207C0687DEf0e78baCf"]"#;
+        let blocklist: Vec<Address> = serde_json::from_str(json).unwrap();
+        let blocklist: BlockList = blocklist.into_iter().collect();
+        let exected_hash =
+            B256::from_str("0xee14e9d115e182f61871a5a385ab2f32ecf434f3b17bdbacc71044810d89e608")
+                .unwrap();
+        let hash = blocklist_hash(&blocklist);
+        assert_eq!(exected_hash, hash);
+    }
+
     struct BlocklistHttpServer {
         /// None -> returns 404 error
         answer: Mutex<Option<String>>,

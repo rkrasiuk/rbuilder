@@ -42,14 +42,10 @@ fn open_log_file(path: PathBuf) -> io::Result<File> {
 }
 
 impl Playground {
-    pub fn new() -> Result<Self, PlaygroundError> {
+    pub fn new(cfg_path: &PathBuf) -> Result<Self, PlaygroundError> {
         // load the binary from the cargo_dir
         let mut bin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         bin_path.push("../../target/debug/rbuilder");
-
-        // Use the config file from the root directory
-        let config_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config-playground.toml");
 
         let dt: OffsetDateTime = SystemTime::now().into();
 
@@ -68,7 +64,7 @@ impl Playground {
 
         let mut cmd = Command::new(bin_path.clone());
 
-        cmd.arg("run").arg(config_path);
+        cmd.arg("run").arg(cfg_path);
         cmd.stdout(stdout).stderr(stderr);
 
         let builder = match cmd.spawn() {
@@ -100,6 +96,23 @@ impl Playground {
         }
 
         Ok(Self { builder })
+    }
+
+    pub fn builder_is_alive(&mut self) -> bool {
+        matches!(self.builder.try_wait(), Ok(None))
+    }
+
+    pub fn blocklist_key(&self) -> EthereumWallet {
+        // Address: 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+        let signer: PrivateKeySigner =
+            "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+                .parse()
+                .unwrap();
+        EthereumWallet::from(signer)
+    }
+
+    pub fn blocklist_address(&self) -> Address {
+        address!("3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
     }
 
     pub async fn wait_for_next_slot(

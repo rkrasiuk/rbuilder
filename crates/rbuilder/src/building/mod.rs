@@ -23,7 +23,6 @@ use crate::{
 };
 use ahash::HashSet;
 use alloy_eips::{
-    calc_excess_blob_gas,
     eip1559::{calculate_block_gas_limit, ETHEREUM_BLOCK_GAS_LIMIT},
     eip4844::BlobTransactionSidecar,
     eip4895::Withdrawals,
@@ -31,6 +30,7 @@ use alloy_eips::{
     eip7002::WITHDRAWAL_REQUEST_TYPE,
     eip7251::CONSOLIDATION_REQUEST_TYPE,
     eip7685::Requests,
+    eip7840::BlobParams,
     merge::BEACON_NONCE,
 };
 use alloy_rpc_types_beacon::events::PayloadAttributesEvent;
@@ -141,20 +141,22 @@ impl BlockBuildingContext {
 
         let excess_blob_gas = if chain_spec.is_cancun_active_at_timestamp(attributes.timestamp) {
             if chain_spec.is_cancun_active_at_timestamp(parent.timestamp) {
-                let parent_excess_blob_gas = parent.excess_blob_gas.unwrap_or_default();
-                let parent_blob_gas_used = parent.blob_gas_used.unwrap_or_default();
-                Some(calc_excess_blob_gas(
-                    parent_excess_blob_gas,
-                    parent_blob_gas_used,
-                ))
+                let blob_params = if chain_spec.is_prague_active_at_timestamp(attributes.timestamp)
+                {
+                    BlobParams::prague()
+                } else {
+                    BlobParams::cancun()
+                };
+                parent.next_block_excess_blob_gas(blob_params)
             } else {
                 // for the first post-fork block, both parent.blob_gas_used and
                 // parent.excess_blob_gas are evaluated as 0
-                Some(calc_excess_blob_gas(0, 0))
+                Some(alloy_eips::eip4844::calc_excess_blob_gas(0, 0))
             }
         } else {
             None
         };
+
         let spec_id = spec_id.unwrap_or_else(|| {
             revm_spec_by_timestamp_and_block_number(
                 &chain_spec,

@@ -1,7 +1,10 @@
 use super::{OrderInputConfig, ReplaceableOrderPoolCommand};
-use crate::primitives::{
-    serialize::{RawBundle, RawShareBundle, RawShareBundleDecodeResult, RawTx, TxEncoding},
-    Bundle, BundleReplacementKey, MempoolTx, Order,
+use crate::{
+    primitives::{
+        serialize::{RawBundle, RawShareBundle, RawShareBundleDecodeResult, RawTx, TxEncoding},
+        Bundle, BundleReplacementKey, MempoolTx, Order,
+    },
+    telemetry::mark_command_received,
 };
 use alloy_primitives::{Address, Bytes};
 use jsonrpsee::{server::Server, types::ErrorObject, RpcModule};
@@ -10,6 +13,7 @@ use std::{
     net::{SocketAddr, SocketAddrV4},
     time::{Duration, Instant},
 };
+use time::OffsetDateTime;
 use tokio::{
     sync::{mpsc, mpsc::error::SendTimeoutError},
     task::JoinHandle,
@@ -42,6 +46,8 @@ pub async fn start_server_accepting_bundles(
     module.register_async_method("eth_sendBundle", move |params, _| {
         let results = results_clone.clone();
         async move {
+	    let received_at = OffsetDateTime::now_utc();
+
             let start = Instant::now();
             let raw_bundle: RawBundle = match params.one() {
                 Ok(raw_bundle) => raw_bundle,
@@ -64,7 +70,7 @@ pub async fn start_server_accepting_bundles(
             let parse_duration = start.elapsed();
             let target_block = order.target_block().unwrap_or_default();
             trace!(order = ?order.id(), parse_duration_mus = parse_duration.as_micros(), target_block, "Received bundle");
-            send_order(order, &results, timeout).await;
+            send_order(order, &results, timeout, received_at).await;
         }
     })?;
 
@@ -80,9 +86,10 @@ pub async fn start_server_accepting_bundles(
 
     let results_clone = results.clone();
     module.register_async_method("eth_sendRawTransaction", move |params, _| {
-        let start = Instant::now();
         let results = results_clone.clone();
         async move {
+	    let received_at = OffsetDateTime::now_utc();
+            let start = Instant::now();
             let raw_tx: Bytes = match params.one() {
                 Ok(raw_tx) => raw_tx,
                 Err(err) => {
@@ -105,7 +112,7 @@ pub async fn start_server_accepting_bundles(
             let order = Order::Tx(tx);
             let parse_duration = start.elapsed();
             trace!(order = ?order.id(), parse_duration_mus = parse_duration.as_micros(), "Received mempool tx from API");
-            send_order(order, &results, timeout).await;
+            send_order(order, &results, timeout, received_at).await;
             Ok(hash)
         }
     })?;
@@ -134,6 +141,7 @@ async fn handle_mev_send_bundle(
     timeout: Duration,
     params: jsonrpsee::types::Params<'static>,
 ) {
+    let received_at = OffsetDateTime::now_utc();
     let start = Instant::now();
     let raw_bundle: RawShareBundle = match params.one() {
         Ok(raw_bundle) => raw_bundle,
@@ -157,7 +165,7 @@ async fn handle_mev_send_bundle(
             let parse_duration = start.elapsed();
             let target_block = order.target_block().unwrap_or_default();
             trace!(order = ?order.id(), parse_duration_mus = parse_duration.as_micros(), target_block, "Received share bundle");
-            send_order(order, &results, timeout).await;
+            send_order(order, &results, timeout, received_at).await;
         }
         RawShareBundleDecodeResult::CancelShareBundle(cancel) => {
             trace!(cancel = ?cancel, "Received share bundle cancellation");
@@ -165,6 +173,7 @@ async fn handle_mev_send_bundle(
                 ReplaceableOrderPoolCommand::CancelShareBundle(cancel),
                 &results,
                 timeout,
+                received_at,
             )
             .await;
         }
@@ -175,8 +184,15 @@ async fn send_order(
     order: Order,
     channel: &mpsc::Sender<ReplaceableOrderPoolCommand>,
     timeout: Duration,
+    received_at: OffsetDateTime,
 ) {
-    send_command(ReplaceableOrderPoolCommand::Order(order), channel, timeout).await;
+    send_command(
+        ReplaceableOrderPoolCommand::Order(order),
+        channel,
+        timeout,
+        received_at,
+    )
+    .await;
 }
 
 /// Eats the errors and traces them.
@@ -184,7 +200,9 @@ async fn send_command(
     command: ReplaceableOrderPoolCommand,
     channel: &mpsc::Sender<ReplaceableOrderPoolCommand>,
     timeout: Duration,
+    received_at: OffsetDateTime,
 ) {
+    mark_command_received(&command, received_at);
     match channel.send_timeout(command, timeout).await {
         Ok(()) => {}
         Err(SendTimeoutError::Timeout(_)) => {
@@ -208,6 +226,7 @@ async fn handle_cancel_bundle(
     timeout: Duration,
     params: jsonrpsee::types::Params<'static>,
 ) {
+    let received_at = OffsetDateTime::now_utc();
     let cancel_bundle: RawCancelBundle = match params.one() {
         Ok(cancel_bundle) => cancel_bundle,
         Err(err) => {
@@ -224,6 +243,7 @@ async fn handle_cancel_bundle(
         ReplaceableOrderPoolCommand::CancelBundle(key),
         &results,
         timeout,
+        received_at,
     )
     .await;
 }

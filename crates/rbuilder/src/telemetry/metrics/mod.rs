@@ -6,8 +6,8 @@
 //! When metric server is spawned is serves prometheus metrics at: /debug/metrics/prometheus
 
 #![allow(unexpected_cfgs)]
+use crate::building::BuiltBlockTrace;
 use crate::{
-    building::ExecutionResult,
     live_builder::block_list_provider::{blocklist_hash, BlockList},
     primitives::mev_boost::MevBoostRelayID,
     utils::build_info::Version,
@@ -21,9 +21,15 @@ use prometheus::{
     Counter, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
     Registry,
 };
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 use time::OffsetDateTime;
 use tracing::error;
+
+mod tracing_metrics;
+
+pub use tracing_metrics::*;
 
 const SUBSIDY_ATTEMPT: &str = "attempt";
 const SUBSIDY_LANDED: &str = "landed";
@@ -32,34 +38,29 @@ const RELAY_ERROR_CONNECTION: &str = "conn";
 const RELAY_ERROR_TOO_MANY_REQUESTS: &str = "too_many";
 const RELAY_ERROR_OTHER: &str = "other";
 
+const SIM_STATUS_OK: &str = "sim_success";
+const SIM_STATUS_FAIL: &str = "sim_fail";
+
 /// We record timestamps only for blocks built within interval of the block timestamp
 const BLOCK_METRICS_TIMESTAMP_LOWER_DELTA: time::Duration = time::Duration::seconds(3);
 /// We record timestamps only for blocks built within interval of the block timestamp
 const BLOCK_METRICS_TIMESTAMP_UPPER_DELTA: time::Duration = time::Duration::seconds(2);
+
+fn is_now_close_to_slot_end(block_timestamp: OffsetDateTime) -> bool {
+    let now = OffsetDateTime::now_utc();
+    let too_early = now < block_timestamp - BLOCK_METRICS_TIMESTAMP_LOWER_DELTA;
+    let too_late = block_timestamp + BLOCK_METRICS_TIMESTAMP_UPPER_DELTA < now;
+    !too_early && !too_late
+}
 
 lazy_static! {
     pub static ref REGISTRY: Registry = Registry::new();
 }
 
 register_metrics! {
-    pub static BLOCK_FILL_TIME: HistogramVec = HistogramVec::new(
-        HistogramOpts::new("block_fill_time", "Block Fill Times (ms)")
-            .buckets(exponential_buckets_range(1.0, 3000.0, 100)),
-        &["builder_name"]
-    )
-    .unwrap();
-    pub static BLOCK_FINALIZE_TIME: HistogramVec = HistogramVec::new(
-        HistogramOpts::new("block_finalize_time", "Block Finalize Times (ms)")
-            .buckets(exponential_buckets_range(1.0, 3000.0, 100)),
-        &["builder_name"]
-    )
-    .unwrap();
-    pub static BLOCK_ROOT_HASH_TIME: HistogramVec = HistogramVec::new(
-        HistogramOpts::new("block_root_hash_time", "Block Root Hash Time (ms)")
-            .buckets(exponential_buckets_range(1.0, 2000.0, 100)),
-        &["builder_name"]
-    )
-    .unwrap();
+
+    // Statistics about finalized blocks
+
     pub static BLOCK_BUILT_TXS: HistogramVec = HistogramVec::new(
         HistogramOpts::new("block_built_txs", "Transactions in the built block")
             .buckets(linear_buckets_range(1.0, 1000.0, 100)),
@@ -87,27 +88,30 @@ register_metrics! {
         &["builder_name"]
     )
     .unwrap();
-    pub static BLOCK_BUILT_MGAS_PER_SECOND: HistogramVec = HistogramVec::new(
-        HistogramOpts::new(
-            "block_built_mgas_per_second",
-            "MGas/s for the built block (including failing txs)"
-        )
-        .buckets(linear_buckets_range(1.0, 1000.0, 100)),
-        &["builder_name"]
-    )
-    .unwrap();
+
+
     pub static BLOCK_VALIDATION_TIME: HistogramVec = HistogramVec::new(
         HistogramOpts::new("block_validation_time", "Block Validation Times (ms)")
             .buckets(exponential_buckets_range(1.0, 3000.0, 100)),
         &[]
     )
     .unwrap();
+
+
+
     pub static CURRENT_BLOCK: IntGauge =
         IntGauge::new("current_block", "Current Block").unwrap();
     pub static ORDERPOOL_TXS: IntGauge =
         IntGauge::new("orderpool_txs", "Transactions In The Orderpool").unwrap();
     pub static ORDERPOOL_BUNDLES: IntGauge =
         IntGauge::new("orderpool_bundles", "Bundles In The Orderpool").unwrap();
+
+    pub static ORDERPOOL_ORDERS_RECEIVED: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderpool_commands_received", "counter of orders received"),
+        &["kind"]
+    )
+    .unwrap();
+
     pub static RELAY_ERRORS: IntCounterVec = IntCounterVec::new(
         Opts::new("relay_errors", "counter of relay errors"),
         &["relay", "kind"]
@@ -173,16 +177,6 @@ register_metrics! {
         &["worker_id"]
     )
     .unwrap();
-    pub static ORDERS_IN_LAST_BUILT_BLOCK_E2E_LAT_MS: HistogramVec = HistogramVec::new(
-        HistogramOpts::new(
-            "orders_in_last_built_block_e2e_lat",
-            "For all blocks that are ready for submission to the relay its = min over orders (submission start - order received)"
-        )
-        .buckets(exponential_buckets_range(0.5, 3_000.0, 30)),
-        &[]
-    )
-    .unwrap();
-
     pub static PROVIDER_REOPEN_COUNTER: IntCounter = IntCounter::new(
         "provider_reopen_counter", "Counter of provider reopens").unwrap();
 
@@ -223,6 +217,109 @@ register_metrics! {
 
     pub static TOTAL_LANDED_SUBSIDIES_SUM: Counter =
         Counter::new("total_landed_subsidies_sum", "Sum of all total landed subsidies").unwrap();
+
+
+    // Performance metrics related to E2E latency
+
+    // Metrics for important step of the block processing
+    pub static BLOCK_FILL_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("block_fill_time", "Block Fill Times (ms)")
+            .buckets(exponential_buckets_range(1.0, 3000.0, 100)),
+        &["builder_name"]
+    )
+    .unwrap();
+    pub static BLOCK_FINALIZE_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("block_finalize_time", "Block Finalize Times (ms)")
+            .buckets(exponential_buckets_range(1.0, 3000.0, 100)),
+        &[]
+    )
+    .unwrap();
+    pub static BLOCK_ROOT_HASH_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("block_root_hash_time", "Block Root Hash Time (ms)")
+            .buckets(exponential_buckets_range(1.0, 2000.0, 100)),
+        &[]
+    )
+    .unwrap();
+    pub static ORDER_SIMULATION_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("order_simulation_time", "Order Simulation Time (ms)")
+            .buckets(exponential_buckets_range(0.01, 200.0, 200)),
+        &["builder_name", "status"]
+    )
+    .unwrap();
+
+    // E2E tracing metrics
+    // The goal of these two metrics is:
+    // 1. Cover as many lines of code as possible without any gaps.
+    // 2. Show E2E latency of the order that could be executed immediately and also arrived towards the end of the slot.
+    // The path of order goes as follows:
+    // Received -> Simulated -> (builders start to build a block with it) -> block sealed -> block submit started
+    pub static ORDER_RECEIVED_TO_SIM_END_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("order_received_to_sim_end_time", "Time between when the order was received and top of the block simulation ended for orders that arrive after slot start. (ms)")
+            .buckets(exponential_buckets_range(0.01, 200.0, 200)),
+        &["status"]
+    )
+    .unwrap();
+    pub static ORDER_SIM_END_TO_FIRST_BUILD_STARTED_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("order_sim_end_to_first_build_started_time", "Time between when the order simulation ended and the builder started to build first block with it. (ms)")
+            .buckets(exponential_buckets_range(0.01, 300.0, 300)),
+        &["builder_name"]
+    )
+    .unwrap();
+    pub static ORDER_SIM_END_TO_FIRST_BUILD_STARTED_MIN_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("order_sim_end_to_first_build_started_min_time", "Time between when the order simulation ended and the first builder started to build first block with it. (ms)")
+            .buckets(exponential_buckets_range(0.01, 300.0, 300)),
+        &["builder_name"]
+    )
+    .unwrap();
+    pub static BLOCK_FILL_START_SEAL_END_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("block_build_start_seal_end_time", "Time between when the block build started and the block sealed ended. (ms)")
+            .buckets(exponential_buckets_range(0.01, 500.0, 300)),
+        &["builder_name"]
+    )
+    .unwrap();
+    pub static BLOCK_SEAL_END_SUBMIT_START_TIME: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("block_seal_end_submit_start_time", "Time between when the block sealed ended and the block submission started. (ms)")
+            .buckets(exponential_buckets_range(0.01, 500.0, 300)),
+        &[]
+    )
+    .unwrap();
+}
+
+// This function should be called periodically to reset histogram metrics.
+// If metrics are not reset histogram quantiles become rigid.
+// Reset period is 10 minutes.
+pub fn reset_histogram_metrics() {
+    const HISTOGRAM_METRIC_RESET_PERIOD: Duration = Duration::from_secs(10 * 60);
+
+    lazy_static! {
+        static ref LAST_RESET: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
+    }
+
+    let now = Instant::now();
+    let mut last_reset = LAST_RESET.lock().unwrap();
+    if now.duration_since(*last_reset) < HISTOGRAM_METRIC_RESET_PERIOD {
+        return;
+    }
+    *last_reset = now;
+
+    // Reset all histogram metrics
+    BLOCK_BUILT_TXS.reset();
+    BLOCK_BUILT_BLOBS.reset();
+    BLOCK_BUILT_GAS_USED.reset();
+    BLOCK_BUILT_SIM_GAS_USED.reset();
+    BLOCK_VALIDATION_TIME.reset();
+    BLOCK_FILL_TIME.reset();
+    BLOCK_FINALIZE_TIME.reset();
+    BLOCK_ROOT_HASH_TIME.reset();
+    ORDER_SIMULATION_TIME.reset();
+    RELAY_SUBMIT_TIME.reset();
+    TXFETCHER_TRANSACTION_QUERY_TIME.reset();
+    SUBSIDY_VALUE.reset();
+    ORDER_RECEIVED_TO_SIM_END_TIME.reset();
+    ORDER_SIM_END_TO_FIRST_BUILD_STARTED_TIME.reset();
+    ORDER_SIM_END_TO_FIRST_BUILD_STARTED_MIN_TIME.reset();
+    BLOCK_FILL_START_SEAL_END_TIME.reset();
+    BLOCK_SEAL_END_SUBMIT_START_TIME.reset();
 }
 
 pub(super) fn set_version(version: Version) {
@@ -289,10 +386,8 @@ pub fn set_ordepool_count(txs: usize, bundles: usize) {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn add_built_block_metrics(
-    build_time: Duration,
-    finalize_time: Duration,
-    root_hash_time: Duration,
+pub fn add_finalized_block_metrics(
+    built_block_trace: &BuiltBlockTrace,
     txs: usize,
     blobs: usize,
     gas_used: u64,
@@ -300,22 +395,17 @@ pub fn add_built_block_metrics(
     builder_name: &str,
     block_timestamp: OffsetDateTime,
 ) {
-    let now = OffsetDateTime::now_utc();
-    if now < block_timestamp - BLOCK_METRICS_TIMESTAMP_LOWER_DELTA
-        || block_timestamp + BLOCK_METRICS_TIMESTAMP_UPPER_DELTA < now
-    {
+    if !is_now_close_to_slot_end(block_timestamp) {
         return;
     }
 
-    BLOCK_FILL_TIME
-        .with_label_values(&[builder_name])
-        .observe(build_time.as_millis() as f64);
     BLOCK_FINALIZE_TIME
-        .with_label_values(&[builder_name])
-        .observe(finalize_time.as_millis() as f64);
+        .with_label_values(&[])
+        .observe(built_block_trace.finalize_time.as_micros() as f64 / 1000.0);
     BLOCK_ROOT_HASH_TIME
-        .with_label_values(&[builder_name])
-        .observe(root_hash_time.as_millis() as f64);
+        .with_label_values(&[])
+        .observe(built_block_trace.root_hash_time.as_micros() as f64 / 1000.0);
+
     BLOCK_BUILT_TXS
         .with_label_values(&[builder_name])
         .observe(txs as f64);
@@ -328,11 +418,26 @@ pub fn add_built_block_metrics(
     BLOCK_BUILT_SIM_GAS_USED
         .with_label_values(&[builder_name])
         .observe(sim_gas_used as f64);
-    BLOCK_BUILT_MGAS_PER_SECOND
+
+    let build_start_seal_end_time =
+        (built_block_trace.orders_sealed_at - built_block_trace.orders_closed_at).as_seconds_f64()
+            * 1000.0;
+    BLOCK_FILL_START_SEAL_END_TIME
         .with_label_values(&[builder_name])
-        .observe(
-            (sim_gas_used as f64) / ((build_time.as_micros() + finalize_time.as_micros()) as f64),
-        );
+        .observe(build_start_seal_end_time);
+}
+
+pub fn add_block_fill_time(
+    duration: Duration,
+    builder_name: &str,
+    block_timestamp: OffsetDateTime,
+) {
+    if !is_now_close_to_slot_end(block_timestamp) {
+        return;
+    }
+    BLOCK_FILL_TIME
+        .with_label_values(&[builder_name])
+        .observe(duration.as_micros() as f64 / 1000.0);
 }
 
 pub fn add_block_validation_time(duration: Duration) {
@@ -392,30 +497,6 @@ pub fn add_sim_thread_utilisation_timings(
         .inc_by(wait_time.as_micros() as u64);
 }
 
-pub fn measure_block_e2e_latency(included_orders: &[ExecutionResult]) {
-    let submission_time = OffsetDateTime::now_utc();
-
-    let mut min_latency = None;
-    for order in included_orders {
-        let latency_ms = (submission_time - order.order.metadata().received_at_timestamp)
-            .as_seconds_f64()
-            * 1000.0;
-        if let Some(current_mint) = min_latency {
-            if latency_ms > 0.0 && latency_ms < current_mint {
-                min_latency = Some(latency_ms);
-            }
-        } else if latency_ms > 0.0 {
-            min_latency = Some(latency_ms);
-        }
-    }
-
-    if let Some(min_latency) = min_latency {
-        ORDERS_IN_LAST_BUILT_BLOCK_E2E_LAT_MS
-            .with_label_values(&[])
-            .observe(min_latency);
-    }
-}
-
 /// landed vs attempt
 fn subsidized_label(landed: bool) -> &'static str {
     if landed {
@@ -439,6 +520,29 @@ pub fn add_subsidy_value(value: U256, landed: bool) {
     if landed {
         TOTAL_LANDED_SUBSIDIES_SUM.inc_by(value_float);
     }
+}
+
+fn sim_status(success: bool) -> &'static str {
+    if success {
+        SIM_STATUS_OK
+    } else {
+        SIM_STATUS_FAIL
+    }
+}
+
+pub fn add_order_simulation_time(duration: Duration, builder_name: &str, success: bool) {
+    ORDER_SIMULATION_TIME
+        .with_label_values(&[builder_name, sim_status(success)])
+        .observe(duration.as_micros() as f64 / 1000.0);
+}
+
+pub fn mark_submission_start_time(block_sealed_at: OffsetDateTime) {
+    // we don't check if we are close to slot end because submission code handles that
+    let now = OffsetDateTime::now_utc();
+    let value = (now - block_sealed_at).as_seconds_f64() * 1000.0;
+    BLOCK_SEAL_END_SUBMIT_START_TIME
+        .with_label_values(&[])
+        .observe(value);
 }
 
 pub(super) fn gather_prometheus_metrics() -> String {

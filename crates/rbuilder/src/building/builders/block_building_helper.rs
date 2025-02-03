@@ -17,7 +17,7 @@ use crate::{
     },
     primitives::SimulatedOrder,
     provider::StateProviderFactory,
-    telemetry,
+    telemetry::{self, add_block_fill_time, add_order_simulation_time},
     utils::{check_block_hash_reader_health, HistoricalBlockError},
 };
 
@@ -218,10 +218,8 @@ where
         let gas_used = finalized_block.sealed_block.gas_used;
         let blobs = finalized_block.txs_blob_sidecars.len();
 
-        telemetry::add_built_block_metrics(
-            built_block_trace.fill_time,
-            built_block_trace.finalize_time,
-            built_block_trace.root_hash_time,
+        telemetry::add_finalized_block_metrics(
+            built_block_trace,
             txs,
             blobs,
             gas_used,
@@ -234,6 +232,7 @@ where
             block = building_ctx.block_env.number.to::<u64>(),
             build_time_mus = built_block_trace.fill_time.as_micros(),
             finalize_time_mus = built_block_trace.finalize_time.as_micros(),
+            root_hash_time_mus = built_block_trace.root_hash_time.as_micros(),
             profit = format_ether(built_block_trace.bid_value),
             builder_name = builder_name,
             txs,
@@ -293,27 +292,35 @@ where
         &mut self,
         order: &SimulatedOrder,
     ) -> Result<Result<&ExecutionResult, ExecutionError>, CriticalCommitOrderError> {
+        let start = Instant::now();
         let result =
             self.partial_block
                 .commit_order(order, &self.building_ctx, &mut self.block_state);
-        match result {
+        let sim_time = start.elapsed();
+        let (result, sim_ok) = match result {
             Ok(ok_result) => match ok_result {
                 Ok(res) => {
                     self.built_block_trace.add_included_order(res);
-                    Ok(Ok(self.built_block_trace.included_orders.last().unwrap()))
+                    (
+                        Ok(Ok(self.built_block_trace.included_orders.last().unwrap())),
+                        true,
+                    )
                 }
                 Err(err) => {
                     self.built_block_trace
                         .modify_payment_when_no_signer_error(&err);
-                    Ok(Err(err))
+                    (Ok(Err(err)), false)
                 }
             },
-            Err(e) => Err(e),
-        }
+            Err(e) => (Err(e), false),
+        };
+        add_order_simulation_time(sim_time, &self.builder_name, sim_ok);
+        result
     }
 
     fn set_trace_fill_time(&mut self, time: Duration) {
         self.built_block_trace.fill_time = time;
+        add_block_fill_time(time, &self.builder_name, self.building_ctx.timestamp())
     }
 
     fn set_trace_orders_closed_at(&mut self, orders_closed_at: OffsetDateTime) {
@@ -369,7 +376,6 @@ where
         };
         self.built_block_trace.update_orders_sealed_at();
         self.built_block_trace.root_hash_time = finalized_block.root_hash_time;
-
         self.built_block_trace.finalize_time = start_time.elapsed();
 
         Self::trace_finalized_block(

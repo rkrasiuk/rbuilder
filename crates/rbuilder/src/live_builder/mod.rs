@@ -21,7 +21,7 @@ use crate::{
     },
     primitives::{MempoolTx, Order, TransactionSignedEcRecoveredWithBlobs},
     provider::StateProviderFactory,
-    telemetry::inc_active_slots,
+    telemetry::{inc_active_slots, mark_building_started, reset_histogram_metrics},
     utils::{
         error_storage::spawn_error_storage_writer, provider_head_state::ProviderHeadState, Signer,
     },
@@ -204,6 +204,8 @@ where
         };
 
         while let Some(payload) = payload_events_channel.recv().await {
+            reset_histogram_metrics();
+
             let blocklist = self.blocklist_provider.get_blocklist()?;
             if blocklist.contains(&payload.fee_recipient()) {
                 warn!(
@@ -278,13 +280,13 @@ where
                 None,
                 root_hasher,
             ) {
+                mark_building_started(block_ctx.timestamp());
                 builder_pool.start_block_building(
                     payload,
                     block_ctx,
                     self.global_cancellation.clone(),
                     time_until_slot_end.try_into().unwrap_or_default(),
                 );
-
                 if let Some(watchdog_sender) = watchdog_sender.as_ref() {
                     watchdog_sender.try_send(()).unwrap_or_default();
                 };

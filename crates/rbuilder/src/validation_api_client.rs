@@ -2,12 +2,11 @@ use alloy_json_rpc::{ErrorPayload, RpcError};
 use std::{fmt::Debug, sync::Arc};
 
 use crate::{
-    mev_boost::submission::SubmitBlockRequest,
-    telemetry::add_block_validation_time,
-    utils::{http_provider, BoxedProvider},
+    mev_boost::submission::SubmitBlockRequest, telemetry::add_block_validation_time,
+    utils::http_provider,
 };
 use alloy_primitives::B256;
-use alloy_provider::Provider;
+use alloy_provider::{Provider, RootProvider};
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::mpsc;
@@ -27,7 +26,7 @@ struct ValidRequest {
 
 #[derive(Debug, Clone)]
 pub struct ValidationAPIClient {
-    providers: Vec<Arc<BoxedProvider>>,
+    providers: Vec<Arc<RootProvider>>,
 }
 
 #[derive(thiserror::Error)]
